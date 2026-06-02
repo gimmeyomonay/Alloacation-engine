@@ -272,7 +272,8 @@ with tab1:
             "eff":       f"{v.efficiency:.1f} Rs/min",
             "cluster":   f"Cluster {v.cluster_id}" if v.cluster_id is not None else "Outlier",
             "rationale": v.rationale,
-            "radius":    max(60, min(160, int(v.V_adj / 500))),
+            "seq_label":  str(v.visit_sequence),
+            "radius":    max(300, min(800, int(v.V_adj / 50))),
         })
 
     # Mandatory visits — always red
@@ -285,6 +286,7 @@ with tab1:
             "lon":       c.lon,
             "colour":    MANDATORY_COLOUR,
             "label":     f"#{v.visit_sequence} {v.name} [MANDATORY]",
+            "seq_label": str(v.visit_sequence),
             "dpd":       v.dpd,
             "osp":       f"Rs{v.osp:,.0f}",
             "v_adj":     f"Rs{v.V_adj:,.0f}",
@@ -292,7 +294,7 @@ with tab1:
             "eff":       f"{v.efficiency:.1f} Rs/min",
             "cluster":   "Mandatory",
             "rationale": v.rationale,
-            "radius":    max(80, min(180, int(v.V_adj / 400))),
+            "radius":    max(400, min(900, int(v.V_adj / 40))),
         })
 
     # Escalation visits — amber
@@ -305,6 +307,7 @@ with tab1:
             "lon":       c.lon,
             "colour":    ESCALATION_COLOUR,
             "label":     f"{v.name} [ESCALATION]",
+            "seq_label": "",
             "dpd":       v.dpd,
             "osp":       f"Rs{v.osp:,.0f}",
             "v_adj":     f"Rs{v.V_adj:,.0f}",
@@ -312,7 +315,7 @@ with tab1:
             "eff":       "-",
             "cluster":   "Escalation",
             "rationale": v.rationale,
-            "radius":    50,
+            "radius":    300,
         })
 
     # ── Arc layer — TSP sequence lines within each cluster ────────────────
@@ -348,13 +351,26 @@ with tab1:
             get_position=["lon", "lat"],
             get_fill_color="colour",
             get_radius="radius",
+            radius_min_pixels=6,
+            radius_max_pixels=24,
             pickable=True,
-            opacity=0.9,
+            opacity=1.0,
             stroked=True,
-            get_line_color=[255, 255, 255, 100],
+            get_line_color=[255, 255, 255, 180],
             line_width_min_pixels=1,
         )
-        layers = [scatter_layer]
+        text_layer = pdk.Layer(
+            "TextLayer",
+            data=points_df[points_df["cluster"] != "Escalation"],
+            get_position=["lon", "lat"],
+            get_text="seq_label",
+            get_size=12,
+            get_color=[255, 255, 255, 220],
+            get_alignment_baseline="'center'",
+            get_text_anchor="'middle'",
+            pickable=False,
+        )
+        layers = [scatter_layer, text_layer]
 
         if not arcs_df.empty:
             arc_layer = pdk.Layer(
@@ -366,12 +382,13 @@ with tab1:
                 get_target_color="colour",
                 get_width=2,
                 pickable=False,
+                auto_highlight=False,
             )
             layers.append(arc_layer)
 
         centre_lat = points_df["lat"].mean()
         centre_lon = points_df["lon"].mean()
-        view_state = pdk.ViewState(latitude=centre_lat, longitude=centre_lon, zoom=11, pitch=0)
+        view_state = pdk.ViewState(latitude=centre_lat, longitude=centre_lon, zoom=11, pitch=0, bearing=0)
 
         tooltip = {
             "html": """
@@ -393,20 +410,16 @@ with tab1:
 
         col_map, col_legend = st.columns([3, 1])
         with col_map:
-            try:
-                map_style = "mapbox://styles/mapbox/dark-v10"
-                st.pydeck_chart(
-                    pdk.Deck(layers=layers, initial_view_state=view_state,
-                             tooltip=tooltip, map_style=map_style),
-                    use_container_width=True, height=520,
-                )
-            except Exception:
-                # Fall back to carto if Mapbox token unavailable
-                st.pydeck_chart(
-                    pdk.Deck(layers=layers, initial_view_state=view_state,
-                             tooltip=tooltip, map_style="carto-darkmatter"),
-                    use_container_width=True, height=520,
-                )
+            st.pydeck_chart(
+                pdk.Deck(
+                    layers=layers,
+                    initial_view_state=view_state,
+                    tooltip=tooltip,
+                    map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+                ),
+                use_container_width=True,
+                height=520,
+            )
 
         with col_legend:
             st.markdown("**Visit types**")
