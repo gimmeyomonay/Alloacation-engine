@@ -50,16 +50,40 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 st.sidebar.title("⚙️ Engine Controls")
 
-n_customers = st.sidebar.slider("Portfolio size", 50, 200, 70, step=10)
-seed        = st.sidebar.number_input("Random seed", value=42, step=1)
+# Data source
+st.sidebar.subheader("Data Source")
+data_source = st.sidebar.radio("Choose input", ["Synthetic data", "Upload CSV"], index=0)
+
+uploaded_file = None
+if data_source == "Upload CSV":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload portfolio CSV",
+        type=["csv"],
+        help="CSV must match the engine schema — download the demo CSV for reference"
+    )
+    with open(os.path.join(os.path.dirname(__file__), "..", "demo_portfolio.csv"), "rb") as f:
+        st.sidebar.download_button(
+            "⬇ Download demo CSV",
+            data=f,
+            file_name="demo_portfolio.csv",
+            mime="text/csv",
+        )
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Synthetic Data Settings")
+n_customers = st.sidebar.slider("Portfolio size", 50, 200, 120, step=10,
+                                 disabled=(data_source == "Upload CSV"))
+seed        = st.sidebar.number_input("Random seed", value=99, step=1,
+                                       disabled=(data_source == "Upload CSV"))
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Engine Config")
 budget_hours   = st.sidebar.slider("Daily budget (hours)", 6, 12, 8)
 acr_cap        = st.sidebar.slider("Max accounts (ACR cap)", 20, 100, 70)
 eps_base_km    = st.sidebar.slider("Cluster radius (km)", 1.0, 10.0, 3.0, step=0.5)
-mandatory_pct  = st.sidebar.slider("Mandatory account %", 0, 30, 8,
-                                    help="Tune down to see more ranked visits")
+mandatory_pct  = st.sidebar.slider("Mandatory account %", 0, 30, 6,
+                                    help="Only applies to synthetic data",
+                                    disabled=(data_source == "Upload CSV"))
 
 st.sidebar.markdown("---")
 run_btn = st.sidebar.button("▶ Run Engine", type="primary", use_container_width=True)
@@ -100,12 +124,33 @@ def run_engine(n, seed, budget_hours, acr_cap, eps_base_km, mandatory_pct):
 
 # Auto-run on first load
 if st.session_state.plan is None or run_btn:
-    with st.spinner("Running allocation engine..."):
-        plan, customers = run_engine(
-            n_customers, seed, budget_hours, acr_cap, eps_base_km, mandatory_pct
-        )
-    st.session_state.plan      = plan
-    st.session_state.customers = customers
+    if data_source == "Upload CSV" and uploaded_file is not None:
+        with st.spinner("Loading CSV and running engine..."):
+            from allocation_engine.main import _load_csv
+            import tempfile, shutil
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                shutil.copyfileobj(uploaded_file, tmp)
+                tmp_path = tmp.name
+            customers = _load_csv(tmp_path)
+            cfg = EngineConfig(
+                daily_budget_minutes=budget_hours * 60,
+                acr_cap=acr_cap,
+                eps_base_km=eps_base_km,
+            )
+            engine = AllocationEngine(prob_model=HeuristicModel(), config=cfg)
+            plan   = engine.run(customers, today=date.today())
+        st.session_state.plan      = plan
+        st.session_state.customers = customers
+    elif data_source == "Upload CSV" and uploaded_file is None:
+        st.info("Upload a CSV file in the sidebar to get started, or switch to Synthetic data.")
+        st.stop()
+    else:
+        with st.spinner("Running allocation engine..."):
+            plan, customers = run_engine(
+                n_customers, seed, budget_hours, acr_cap, eps_base_km, mandatory_pct
+            )
+        st.session_state.plan      = plan
+        st.session_state.customers = customers
 
 plan      = st.session_state.plan
 customers = st.session_state.customers
