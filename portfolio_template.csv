@@ -1,0 +1,6 @@
+customer_id,name,osp,dpd,due_date,lat,lon,zone_id,reason_code,is_ots,settlement_amount,last_visit_date,ptp_given,ptp_kept,ptp_broken,contact_attempts,is_mandatory,is_msd_zone,loan_product
+CUST0001,Ravi Kumar,75000.00,45,2026-04-18,12.9716,77.5946,Z1,IDV_TEMP,False,0.0,2026-05-15,2,1,1,4,False,False,GL
+CUST0002,Priya Sharma,120000.00,15,2026-05-18,12.9352,77.6245,Z2,TNC,False,0.0,,0,0,0,2,False,False,IL
+CUST0003,Suresh Reddy,50000.00,75,2026-03-19,13.0100,77.5500,Z3,WLD,False,0.0,2026-04-10,3,0,3,6,True,False,SHL
+CUST0004,Anjali Naik,200000.00,30,2026-05-03,12.9850,77.7200,Z4,IDV_LONG,True,95000.0,2026-05-20,1,1,0,3,False,False,LAP
+CUST0005,Mohan Patil,25000.00,5,2026-05-28,,,Z5,TCI,False,0.0,,0,0,0,1,False,False,SBL

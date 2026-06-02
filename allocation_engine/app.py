@@ -61,12 +61,23 @@ if data_source == "Upload CSV":
         type=["csv"],
         help="CSV must match the engine schema — download the demo CSV for reference"
     )
+    # Template — headers + 5 example rows
+    with open(os.path.join(os.path.dirname(__file__), "..", "portfolio_template.csv"), "rb") as f:
+        st.sidebar.download_button(
+            "⬇ Download blank template",
+            data=f,
+            file_name="portfolio_template.csv",
+            mime="text/csv",
+            help="Headers + 5 example rows showing the expected format",
+        )
+    # Full demo dataset — 120 realistic customers
     with open(os.path.join(os.path.dirname(__file__), "..", "demo_portfolio.csv"), "rb") as f:
         st.sidebar.download_button(
-            "⬇ Download demo CSV",
+            "⬇ Download demo dataset (120 customers)",
             data=f,
             file_name="demo_portfolio.csv",
             mime="text/csv",
+            help="Fully populated demo portfolio — upload this to see the engine in action",
         )
 
 st.sidebar.markdown("---")
