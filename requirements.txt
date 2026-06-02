@@ -4,3 +4,4 @@ pandas
 requests
 rich
 streamlit
+pydeck>=0.8

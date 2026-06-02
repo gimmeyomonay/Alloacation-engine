@@ -221,46 +221,234 @@ def visits_to_df(visits, label):
 # ── TAB 1: Map ───────────────────────────────────────────────────────────────
 with tab1:
     st.subheader("Customer Locations & Visit Plan")
-
-    # Build map dataframe
-    map_rows = []
+    import pydeck as pdk
     cust_map = {c.customer_id: c for c in customers}
 
-    all_visits = (
-        [(v, "Mandatory",  "#ef4444") for v in plan.mandatory_visits] +
-        [(v, "Ranked",     "#22c55e") for v in plan.ranked_visits] +
-        [(v, "Escalation", "#f59e0b") for v in plan.escalation_queue]
-    )
+    # ── Colour palette for clusters (up to 12 clusters) ──────────────────
+    CLUSTER_COLOURS = [
+        [29, 158, 117],   # teal
+        [55, 138, 221],   # blue
+        [216, 90, 48],    # orange-red
+        [159, 63, 190],   # purple
+        [186, 117, 23],   # amber
+        [59, 109, 17],    # dark green
+        [220, 38, 38],    # red
+        [14, 165, 233],   # sky blue
+        [168, 85, 247],   # violet
+        [234, 88, 12],    # orange
+        [20, 184, 166],   # cyan
+        [132, 204, 22],   # lime
+    ]
+    MANDATORY_COLOUR  = [239, 68, 68, 220]
+    ESCALATION_COLOUR = [245, 158, 11, 200]
+    OUTLIER_COLOUR    = [240, 240, 240, 200]
 
-    for v, vtype, color in all_visits:
+    # ── Build point layer data ────────────────────────────────────────────
+    point_rows = []
+    arc_rows   = []
+    cluster_colour_map: dict = {}
+
+    # Ranked visits — colour by cluster
+    for v in plan.ranked_visits:
         c = cust_map.get(v.customer_id)
-        if c and c.lat is not None:
-            map_rows.append({
-                "lat":   c.lat,
-                "lon":   c.lon,
-                "name":  v.name,
-                "type":  vtype,
-                "dpd":   v.dpd,
-                "V_adj": round(v.V_adj),
-                "seq":   v.visit_sequence,
+        if not c or c.lat is None:
+            continue
+        if v.cluster_id is not None:
+            if v.cluster_id not in cluster_colour_map:
+                idx = len(cluster_colour_map) % len(CLUSTER_COLOURS)
+                cluster_colour_map[v.cluster_id] = CLUSTER_COLOURS[idx]
+            colour = cluster_colour_map[v.cluster_id] + [220]
+        else:
+            colour = OUTLIER_COLOUR
+        point_rows.append({
+            "lat":       c.lat,
+            "lon":       c.lon,
+            "colour":    colour,
+            "label":     f"#{v.visit_sequence} {v.name}",
+            "dpd":       v.dpd,
+            "osp":       f"Rs{v.osp:,.0f}",
+            "v_adj":     f"Rs{v.V_adj:,.0f}",
+            "prob":      f"{v.probability:.0%}",
+            "eff":       f"{v.efficiency:.1f} Rs/min",
+            "cluster":   f"Cluster {v.cluster_id}" if v.cluster_id is not None else "Outlier",
+            "rationale": v.rationale,
+            "radius":    max(60, min(160, int(v.V_adj / 500))),
+        })
+
+    # Mandatory visits — always red
+    for v in plan.mandatory_visits:
+        c = cust_map.get(v.customer_id)
+        if not c or c.lat is None:
+            continue
+        point_rows.append({
+            "lat":       c.lat,
+            "lon":       c.lon,
+            "colour":    MANDATORY_COLOUR,
+            "label":     f"#{v.visit_sequence} {v.name} [MANDATORY]",
+            "dpd":       v.dpd,
+            "osp":       f"Rs{v.osp:,.0f}",
+            "v_adj":     f"Rs{v.V_adj:,.0f}",
+            "prob":      f"{v.probability:.0%}",
+            "eff":       f"{v.efficiency:.1f} Rs/min",
+            "cluster":   "Mandatory",
+            "rationale": v.rationale,
+            "radius":    max(80, min(180, int(v.V_adj / 400))),
+        })
+
+    # Escalation visits — amber
+    for v in plan.escalation_queue:
+        c = cust_map.get(v.customer_id)
+        if not c or c.lat is None:
+            continue
+        point_rows.append({
+            "lat":       c.lat,
+            "lon":       c.lon,
+            "colour":    ESCALATION_COLOUR,
+            "label":     f"{v.name} [ESCALATION]",
+            "dpd":       v.dpd,
+            "osp":       f"Rs{v.osp:,.0f}",
+            "v_adj":     f"Rs{v.V_adj:,.0f}",
+            "prob":      f"{v.probability:.0%}",
+            "eff":       "-",
+            "cluster":   "Escalation",
+            "rationale": v.rationale,
+            "radius":    50,
+        })
+
+    # ── Arc layer — TSP sequence lines within each cluster ────────────────
+    from collections import defaultdict
+    cluster_visits: dict = defaultdict(list)
+    for v in plan.ranked_visits:
+        if v.cluster_id is not None:
+            c = cust_map.get(v.customer_id)
+            if c and c.lat is not None:
+                cluster_visits[v.cluster_id].append(
+                    (v.visit_sequence, c.lat, c.lon, v.cluster_id)
+                )
+    for cid, members in cluster_visits.items():
+        members.sort(key=lambda x: x[0])
+        colour = cluster_colour_map.get(cid, CLUSTER_COLOURS[0])
+        for i in range(len(members) - 1):
+            _, lat1, lon1, _ = members[i]
+            _, lat2, lon2, _ = members[i + 1]
+            arc_rows.append({
+                "source_lat": lat1, "source_lon": lon1,
+                "target_lat": lat2, "target_lon": lon2,
+                "colour":     colour + [160],
             })
 
-    if map_rows:
-        map_df = pd.DataFrame(map_rows)
+    # ── Render ────────────────────────────────────────────────────────────
+    if point_rows:
+        points_df = pd.DataFrame(point_rows)
+        arcs_df   = pd.DataFrame(arc_rows) if arc_rows else pd.DataFrame()
 
-        # Color map
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.map(map_df, latitude="lat", longitude="lon", size=80)
-        with col2:
-            st.markdown("**Legend**")
-            st.markdown('<span class="tag-mandatory">Mandatory</span>', unsafe_allow_html=True)
-            st.markdown('<span class="tag-ranked">Ranked</span>',     unsafe_allow_html=True)
-            st.markdown('<span class="tag-escalation">Escalation</span>', unsafe_allow_html=True)
+        scatter_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=points_df,
+            get_position=["lon", "lat"],
+            get_fill_color="colour",
+            get_radius="radius",
+            pickable=True,
+            opacity=0.9,
+            stroked=True,
+            get_line_color=[255, 255, 255, 100],
+            line_width_min_pixels=1,
+        )
+        layers = [scatter_layer]
+
+        if not arcs_df.empty:
+            arc_layer = pdk.Layer(
+                "ArcLayer",
+                data=arcs_df,
+                get_source_position=["source_lon", "source_lat"],
+                get_target_position=["target_lon", "target_lat"],
+                get_source_color="colour",
+                get_target_color="colour",
+                get_width=2,
+                pickable=False,
+            )
+            layers.append(arc_layer)
+
+        centre_lat = points_df["lat"].mean()
+        centre_lon = points_df["lon"].mean()
+        view_state = pdk.ViewState(latitude=centre_lat, longitude=centre_lon, zoom=11, pitch=0)
+
+        tooltip = {
+            "html": """
+                <div style='font-family:sans-serif;font-size:13px;padding:6px;'>
+                  <b>{label}</b><br/>
+                  DPD: {dpd} &nbsp;|&nbsp; {cluster}<br/>
+                  OSP: {osp} &nbsp;|&nbsp; V_adj: {v_adj}<br/>
+                  P(recovery): {prob} &nbsp;|&nbsp; Efficiency: {eff}<br/>
+                  <i>{rationale}</i>
+                </div>
+            """,
+            "style": {
+                "backgroundColor": "#1e1e2e",
+                "color": "white",
+                "border": "1px solid #444",
+                "borderRadius": "6px",
+            },
+        }
+
+        col_map, col_legend = st.columns([3, 1])
+        with col_map:
+            try:
+                map_style = "mapbox://styles/mapbox/dark-v10"
+                st.pydeck_chart(
+                    pdk.Deck(layers=layers, initial_view_state=view_state,
+                             tooltip=tooltip, map_style=map_style),
+                    use_container_width=True, height=520,
+                )
+            except Exception:
+                # Fall back to carto if Mapbox token unavailable
+                st.pydeck_chart(
+                    pdk.Deck(layers=layers, initial_view_state=view_state,
+                             tooltip=tooltip, map_style="carto-darkmatter"),
+                    use_container_width=True, height=520,
+                )
+
+        with col_legend:
+            st.markdown("**Visit types**")
+            st.markdown(
+                '<span class="tag-mandatory">● Mandatory</span><br/>'
+                '<span class="tag-ranked">● Ranked</span><br/>'
+                '<span class="tag-escalation">● Escalation</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("&nbsp;")
+
+            if cluster_colour_map:
+                st.markdown("**Clusters**")
+                cl_stats: dict = defaultdict(lambda: {"count": 0, "recovery": 0.0, "eff": []})
+                for v in plan.ranked_visits:
+                    if v.cluster_id is not None:
+                        cl_stats[v.cluster_id]["count"]    += 1
+                        cl_stats[v.cluster_id]["recovery"] += v.V_adj
+                        cl_stats[v.cluster_id]["eff"].append(v.efficiency)
+                for cid in sorted(cl_stats.keys()):
+                    stat    = cl_stats[cid]
+                    colour  = cluster_colour_map.get(cid, [150, 150, 150])
+                    hex_col = "#{:02x}{:02x}{:02x}".format(*colour[:3])
+                    avg_eff = sum(stat["eff"]) / len(stat["eff"]) if stat["eff"] else 0
+                    st.markdown(
+                        f'<div style="border-left:4px solid {hex_col};'
+                        f'padding:6px 10px;margin-bottom:6px;'
+                        f'background:rgba(255,255,255,0.04);border-radius:0 4px 4px 0;">'
+                        f'<b style="color:{hex_col}">Cluster {cid}</b><br/>'
+                        f'<span style="font-size:12px;color:#aaa;">'
+                        f'{stat["count"]} customers &middot; '
+                        f'Rs{stat["recovery"]:,.0f} &middot; '
+                        f'{avg_eff:.1f} Rs/min</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
             st.markdown("---")
-            st.markdown(f"**{len(map_rows)}** customers plotted")
-            no_gps = sum(1 for c in customers if c.lat is None)
-            st.markdown(f"**{no_gps}** missing GPS (not shown)")
+            total_gps = sum(1 for c in customers if c.lat is not None)
+            no_gps    = sum(1 for c in customers if c.lat is None)
+            st.markdown(f"**{total_gps}** customers plotted")
+            if no_gps:
+                st.markdown(f"**{no_gps}** missing GPS (not shown)")
     else:
         st.info("No GPS coordinates available to plot.")
 
