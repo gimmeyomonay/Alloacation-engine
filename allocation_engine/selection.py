@@ -100,12 +100,36 @@ def greedy_select(
     selected_clusters: list[dict] = []
     selected_outliers: list[int] = []
 
-    # Interleave clusters and outliers by efficiency
+    # Track agent's current location to charge inter-cluster travel
+    current_exit: tuple[float, float] | None = None
+
+    def _cluster_centroid(cl: dict) -> tuple[float, float]:
+        lats = [cl["coords"][k][0] for k in range(len(cl["coords"]))]
+        lons = [cl["coords"][k][1] for k in range(len(cl["coords"]))]
+        return (sum(lats) / len(lats), sum(lons) / len(lons))
+
+    def _customer_coord(local_idx: int) -> tuple[float, float]:
+        from .routing import haversine_minutes
+        from .clustering import compute_zone_centroids
+        c = customers[local_idx]
+        if c.lat is not None and c.lon is not None:
+            return (c.lat, c.lon)
+        zc = compute_zone_centroids(customers)
+        return zc.get(c.zone_id, (0.0, 0.0))
+
+    def _inter_travel(dest: tuple[float, float]) -> float:
+        from .routing import haversine_minutes
+        if current_exit is None:
+            return 0.0
+        return haversine_minutes(
+            current_exit[0], current_exit[1],
+            dest[0], dest[1],
+        )
+
     cluster_ptr = 0
     outlier_ptr = 0
 
     while remaining_budget > 0 and remaining_cap > 0:
-        # Pick the next best item (cluster or outlier)
         next_cluster = eligible_clusters[cluster_ptr] if cluster_ptr < len(eligible_clusters) else None
         next_outlier_idx = eligible_outliers[outlier_ptr] if outlier_ptr < len(eligible_outliers) else None
 
@@ -113,34 +137,45 @@ def greedy_select(
             break
 
         cluster_eff = next_cluster["efficiency"] if next_cluster else -1
-        outlier_eff = outlier_efficiency(next_outlier_idx, V_adj, interaction_times) if next_outlier_idx is not None else -1
+        outlier_eff = (
+            outlier_efficiency(next_outlier_idx, V_adj, interaction_times)
+            if next_outlier_idx is not None else -1
+        )
 
-        # Try the higher-efficiency option first
         if cluster_eff >= outlier_eff:
             cl = next_cluster
-            cl_time = cl["total_time_min"]
+            centroid = _cluster_centroid(cl)
+            inter = _inter_travel(centroid)
+            cl_time = cl["total_time_min"] + inter
             cl_count = len(cl["member_indices"])
             if cl_time <= remaining_budget and cl_count <= remaining_cap:
                 selected_clusters.append(cl)
+                cl["inter_travel_min"] = inter
                 remaining_budget -= cl_time
                 remaining_cap -= cl_count
+                current_exit = centroid
             else:
-                # Cluster doesn't fit — check if an outlier fits instead
                 if next_outlier_idx is not None:
-                    o_time = interaction_times[next_outlier_idx]
+                    o_coord = _customer_coord(next_outlier_idx)
+                    o_inter = _inter_travel(o_coord)
+                    o_time = interaction_times[next_outlier_idx] + o_inter
                     if o_time <= remaining_budget and 1 <= remaining_cap:
                         selected_outliers.append(next_outlier_idx)
                         remaining_budget -= o_time
                         remaining_cap -= 1
+                        current_exit = o_coord
                         outlier_ptr += 1
                         continue
             cluster_ptr += 1
         else:
-            o_time = interaction_times[next_outlier_idx]
+            o_coord = _customer_coord(next_outlier_idx)
+            o_inter = _inter_travel(o_coord)
+            o_time = interaction_times[next_outlier_idx] + o_inter
             if o_time <= remaining_budget and 1 <= remaining_cap:
                 selected_outliers.append(next_outlier_idx)
                 remaining_budget -= o_time
                 remaining_cap -= 1
+                current_exit = o_coord
             outlier_ptr += 1
 
     return selected_clusters, selected_outliers

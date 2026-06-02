@@ -20,16 +20,18 @@ def _next_bucket_boundary(dpd: int) -> int | None:
     return None
 
 
-def _projected_urgency(projected_dpd: int, amount: float) -> float:
-    boundary = _next_bucket_boundary(projected_dpd)
-    if boundary is None:
-        return 0.0
-    days_to = boundary - projected_dpd
-    if days_to > 3:
-        return 0.0
-    current_prov = get_provision_pct(projected_dpd)
-    next_prov = get_provision_pct(boundary)
-    return (next_prov - current_prov) * amount
+def _projected_urgency(current_dpd: int, projected_dpd: int, amount: float) -> float:
+    """
+    Returns urgency boost (Rs) if the account crosses a DPD bucket boundary
+    between current_dpd and projected_dpd.
+    Uses current_dpd for the baseline provision so the delta is non-zero
+    when a boundary is crossed.
+    """
+    current_prov = get_provision_pct(current_dpd)
+    proj_prov    = get_provision_pct(projected_dpd)
+    if proj_prov > current_prov:
+        return (proj_prov - current_prov) * amount
+    return 0.0
 
 
 def project_dpd_trajectory(
@@ -46,7 +48,7 @@ def project_dpd_trajectory(
         projected_P = get_base_P(projected_dpd) * get_severity(customer.reason_code)
         projected_P = min(1.0, max(0.02, projected_P))
         projected_V = customer.amount * projected_P
-        projected_urgency = _projected_urgency(projected_dpd, customer.amount)
+        projected_urgency = _projected_urgency(customer.dpd, projected_dpd, customer.amount)
         projections.append({
             "day":               day_k,
             "projected_dpd":     projected_dpd,

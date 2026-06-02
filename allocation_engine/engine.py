@@ -67,8 +67,15 @@ class AllocationEngine:
             cfg.agent_speed_kmh, cfg.road_factor,
         )
 
-        # ── Step 4: Greedy selection (scoreable-local indices) ───────
-        mandatory_time = sum(interact_all[i] for i in mandatory_idx)
+        # ── Step 4: Compute mandatory visit time (interaction + travel) ─
+        mandatory_customers = [customers[i] for i in mandatory_idx]
+        mandatory_travel_legs = self._compute_mandatory_travel(
+            mandatory_customers, cfg.agent_speed_kmh, cfg.road_factor
+        )
+        mandatory_time = (
+            sum(interact_all[i] for i in mandatory_idx)
+            + sum(mandatory_travel_legs)
+        )
         all_local = list(range(len(sc_customers)))
         sel_clusters, sel_outliers_local = greedy_select(
             sc_customers, all_local, clusters, outliers_local,
@@ -94,7 +101,7 @@ class AllocationEngine:
 
         # Mandatory visits
         mandatory_visits = self._mandatory_visits(
-            customers, mandatory_idx, scores, seq
+            customers, mandatory_idx, scores, seq, mandatory_travel_legs
         )
         seq += len(mandatory_visits)
 
@@ -143,17 +150,73 @@ class AllocationEngine:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _compute_mandatory_travel(
+        self,
+        mandatory_customers: list[Customer],
+        speed_kmh: float,
+        road_factor: float,
+    ) -> list[float]:
+        """
+        Compute per-leg travel times for mandatory visits using nearest-neighbour
+        ordering. Returns a list of travel times (minutes) aligned with
+        mandatory_customers — index 0 is always 0.0 (no prior travel for first visit).
+        """
+        from .routing import haversine_minutes
+        from .clustering import compute_zone_centroids, assign_coordinates
+        if not mandatory_customers:
+            return []
+        zone_centroids = compute_zone_centroids(mandatory_customers)
+        coords, _ = assign_coordinates(mandatory_customers, zone_centroids)
+        n = len(coords)
+        if n == 1:
+            return [0.0]
+        # Nearest-neighbour ordering starting from index 0
+        unvisited = list(range(1, n))
+        order = [0]
+        while unvisited:
+            current = order[-1]
+            nearest = min(
+                unvisited,
+                key=lambda j: haversine_minutes(
+                    coords[current][0], coords[current][1],
+                    coords[j][0], coords[j][1],
+                    speed_kmh=speed_kmh, road_factor=road_factor,
+                )
+            )
+            order.append(nearest)
+            unvisited.remove(nearest)
+        # Build per-leg travel times in order sequence
+        legs_by_order = [0.0]
+        for k in range(1, len(order)):
+            prev, curr = order[k - 1], order[k]
+            legs_by_order.append(haversine_minutes(
+                coords[prev][0], coords[prev][1],
+                coords[curr][0], coords[curr][1],
+                speed_kmh=speed_kmh, road_factor=road_factor,
+            ))
+        # Re-map back to original customer order
+        legs = [0.0] * n
+        for pos, orig_idx in enumerate(order):
+            legs[orig_idx] = legs_by_order[pos]
+        return legs
+
     def _mandatory_visits(
         self,
         customers: list[Customer],
         mandatory_idx: list[int],
         scores: list[dict],
         seq_start: int,
+        travel_legs: list[float] | None = None,
     ) -> list[CustomerVisit]:
+        if travel_legs is None:
+            travel_legs = [0.0] * len(mandatory_idx)
         visits = []
         for offset, idx in enumerate(mandatory_idx):
             c = customers[idx]
             s = scores[idx]
+            t_travel = travel_legs[offset] if offset < len(travel_legs) else 0.0
+            total_time = s["interaction_min"] + t_travel
+            eff = s["V_adj"] / total_time if total_time > 0 else 0.0
             visits.append(CustomerVisit(
                 rank=0,
                 customer_id=c.customer_id,
@@ -164,8 +227,8 @@ class AllocationEngine:
                 V_i=s["V_i"],
                 V_adj=s["V_adj"],
                 urgency_boost=s["urgency_boost"],
-                efficiency=s["V_adj"] / s["interaction_min"] if s["interaction_min"] > 0 else 0.0,
-                travel_minutes=0.0,
+                efficiency=eff,
+                travel_minutes=round(t_travel, 1),
                 interaction_min=s["interaction_min"],
                 cluster_id=None,
                 visit_sequence=seq_start + offset,
@@ -203,11 +266,19 @@ class AllocationEngine:
             route = cl["route"]           # ordered local indices
             size  = len(route)
             travel_mat = cl["travel_matrix"]
+            # Recompute efficiency using only members within sc_V_adj bounds
+            # (absorbed outliers may have extended member_indices)
+            valid_members = [i for i in cl["member_indices"] if i < len(sc_V_adj)]
+            V_C = sum(sc_V_adj[i] for i in valid_members)
+            T_C = cl["total_time_min"]
+            eff = V_C / T_C if T_C > 0 else 0.0
 
             for local_pos, local_idx in enumerate(route):
+                # Guard: skip absorbed outlier indices that exceed scoreable_idx
+                if local_idx >= len(scoreable_idx):
+                    continue
                 c   = sc_customers[local_idx]
                 s   = scores_all[scoreable_idx[local_idx]]
-                eff = cluster_efficiency(cl, sc_V_adj)
 
                 # Travel time: first member gets 0 (depot start), rest get leg time
                 if local_pos == 0:

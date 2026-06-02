@@ -348,8 +348,15 @@ with tab5:
     # OSP distribution
     with col3:
         st.markdown("**OSP Distribution (Rs)**")
-        osp_df = pd.DataFrame({"OSP": [c.osp for c in customers]})
-        st.bar_chart(osp_df["OSP"].value_counts(bins=10).sort_index())
+        osp_vals   = [c.osp for c in customers]
+        osp_bins   = [0, 25000, 50000, 100000, 150000, 200000, float("inf")]
+        osp_labels = ["<25k", "25-50k", "50-100k", "1-1.5L", "1.5-2L", ">2L"]
+        osp_counts = (
+            pd.cut(osp_vals, bins=osp_bins, labels=osp_labels, right=False)
+            .value_counts()
+            .reindex(osp_labels, fill_value=0)
+        )
+        st.bar_chart(osp_counts)
 
     # Plan composition
     with col4:
