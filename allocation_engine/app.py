@@ -91,7 +91,18 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Engine Config")
 budget_hours   = st.sidebar.slider("Daily budget (hours)", 6, 12, 8)
 acr_cap        = st.sidebar.slider("Max accounts (ACR cap)", 20, 100, 70)
-eps_base_km    = st.sidebar.slider("Cluster radius (km)", 1.0, 10.0, 3.0, step=0.5)
+eps_base_km    = st.sidebar.slider(
+    "Cluster radius (km)",
+    min_value=0.5,
+    max_value=5.0,
+    value=1.5,
+    step=0.5,
+    help=(
+        "Radius within which customers are grouped into a cluster. "
+        "Lower = tighter, more clusters. Higher = looser, fewer larger clusters. "
+        "For Bengaluru: 1.0-2.0km works well."
+    ),
+)
 mandatory_pct  = st.sidebar.slider("Mandatory account %", 0, 30, 6,
                                     help="Only applies to synthetic data",
                                     disabled=(data_source == "Upload CSV"))

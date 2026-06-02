@@ -12,7 +12,7 @@ class EngineConfig:
     acr_cap:               int   = 70
     repeat_penalty_coeff:  float = 0.35
     penalty_decay_days:    int   = 30
-    eps_base_km:           float = 3.0       # DBSCAN base radius in km
+    eps_base_km:           float = 1.5       # DBSCAN base radius in km
     alpha:                 float = 0.5       # value expansion factor for epsilon
     min_cluster_size:      int   = 2
     road_factor:           float = 1.35      # haversine → road distance multiplier
