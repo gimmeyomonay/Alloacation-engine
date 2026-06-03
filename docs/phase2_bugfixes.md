@@ -8,17 +8,20 @@ These bugs were identified by observing that the Streamlit map showed geographic
 
 ---
 
-## Bug 1 — Mandatory visits sequenced in pool order, not route order
+## Bug 1 — Mandatory visits sequenced in pool order, not route order; no 2-opt improvement
 
 **File:** `allocation_engine/engine.py` — `_compute_mandatory_travel`, `_mandatory_visits`
 
-**Root cause:**  
+**Root cause (part A — pool order):**  
 `_compute_mandatory_travel` computed the nearest-neighbour TSP route for mandatory customers and calculated per-leg travel times, but then re-mapped the legs back to the *original pool order* (the order customers appeared in the input list). `_mandatory_visits` iterated in that same original order and assigned sequence numbers 1, 2, 3 … accordingly.
 
 The result: sequence numbers on the map reflected which customer appeared first in the data, not which the agent would physically visit first. An agent following the numbered sequence would zigzag across the city.
 
+**Root cause (part B — no 2-opt, fixed start):**  
+`_compute_mandatory_travel` implemented its own nearest-neighbour loop from scratch (always starting from customer index 0), bypassing the `nearest_neighbour_tsp()` function in `routing.py` which includes 2-opt improvement. This produced suboptimal routes — geographically adjacent customers (#1 and #6 in the observed case) appeared with non-adjacent sequence numbers because the greedy nearest-neighbour with a fixed start made locally optimal choices that left backtracking later.
+
 **Fix:**  
-`_compute_mandatory_travel` now returns both the travel legs *and* the TSP route order. `_mandatory_visits` iterates in TSP order, so sequence numbers 1, 2, 3 … match the geographic route.
+`_compute_mandatory_travel` now uses `nearest_neighbour_tsp()` with `two_opt=True`, tries **every customer as a starting point**, and keeps the shortest resulting route. On the 7-customer example from the screenshot, total travel dropped from 73.9 min to 61.2 min, and the 4 geographically adjacent NW customers were assigned consecutive sequence numbers (2–5) instead of being split across the day.
 
 ---
 

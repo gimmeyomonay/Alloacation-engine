@@ -170,13 +170,14 @@ class AllocationEngine:
     ) -> tuple[list[float], list[int]]:
         """
         Compute per-leg travel times for mandatory visits using nearest-neighbour
-        ordering.
+        TSP with 2-opt improvement, trying every customer as a starting point
+        and keeping the shortest total route.
 
         Returns:
             legs_in_route_order  — travel time per leg, indexed by TSP position
             route_order          — TSP visit order as indices into mandatory_customers
         """
-        from .routing import haversine_minutes
+        from .routing import haversine_matrix, nearest_neighbour_tsp, route_travel_time
         from .clustering import compute_zone_centroids, assign_coordinates
         if not mandatory_customers:
             return [], []
@@ -185,31 +186,26 @@ class AllocationEngine:
         n = len(coords)
         if n == 1:
             return [0.0], [0]
-        # Nearest-neighbour ordering starting from index 0
-        unvisited = list(range(1, n))
-        order = [0]
-        while unvisited:
-            current = order[-1]
-            nearest = min(
-                unvisited,
-                key=lambda j: haversine_minutes(
-                    coords[current][0], coords[current][1],
-                    coords[j][0], coords[j][1],
-                    speed_kmh=speed_kmh, road_factor=road_factor,
-                )
-            )
-            order.append(nearest)
-            unvisited.remove(nearest)
-        # Build per-leg travel times aligned with route order
-        legs_by_order = [0.0]
-        for k in range(1, len(order)):
-            prev, curr = order[k - 1], order[k]
-            legs_by_order.append(haversine_minutes(
-                coords[prev][0], coords[prev][1],
-                coords[curr][0], coords[curr][1],
-                speed_kmh=speed_kmh, road_factor=road_factor,
-            ))
-        return legs_by_order, order
+
+        mat = haversine_matrix(coords, speed_kmh=speed_kmh, road_factor=road_factor)
+        indices = list(range(n))
+
+        # Try every starting point; keep the shortest 2-opt-improved route
+        best_route = None
+        best_cost = float("inf")
+        for start in indices:
+            candidate = nearest_neighbour_tsp(indices, mat, start_idx=start, two_opt=True)
+            cost = route_travel_time(candidate, mat)
+            if cost < best_cost:
+                best_cost = cost
+                best_route = candidate
+
+        # Build per-leg travel times in best route order
+        legs = [0.0]
+        for k in range(1, len(best_route)):
+            legs.append(float(mat[best_route[k - 1], best_route[k]]))
+
+        return legs, best_route
 
     def _mandatory_visits(
         self,
