@@ -11,7 +11,7 @@ from .config import EngineConfig
 from .models import Customer, CustomerVisit, VisitPlan, WatchItem
 from .probability import ProbabilityModel, HeuristicModel
 from .scoring import score_customer
-from .clustering import compute_zone_centroids, value_weighted_dbscan, build_clusters, split_oversized_clusters
+from .clustering import compute_zone_centroids, value_weighted_dbscan, build_clusters
 from .selection import (
     split_pool, greedy_select, absorb_outliers,
     build_visit_records, cluster_efficiency, outlier_efficiency,
@@ -71,10 +71,6 @@ class AllocationEngine:
         )
         clusters, outliers_local = build_clusters(
             sc_customers, labels, sc_interact,
-            cfg.agent_speed_kmh, cfg.road_factor,
-        )
-        clusters = split_oversized_clusters(
-            clusters, cfg.max_cluster_visits, sc_interact,
             cfg.agent_speed_kmh, cfg.road_factor,
         )
 

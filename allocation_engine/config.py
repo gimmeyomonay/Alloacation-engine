@@ -15,7 +15,6 @@ class EngineConfig:
     eps_base_km:           float = 1.5       # DBSCAN base radius in km
     alpha:                 float = 0.5       # value expansion factor for epsilon
     min_cluster_size:      int   = 2
-    max_cluster_visits:    int   = 12      # split clusters larger than this into sub-clusters
     road_factor:           float = 1.35      # haversine → road distance multiplier
     agent_speed_kmh:       float = 25.0
     outlier_absorb_delta:  float = 0.10      # max efficiency degradation to absorb outlier

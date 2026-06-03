@@ -58,6 +58,84 @@ def outlier_efficiency(idx: int, V_adj: list[float], interaction_times: list[flo
 # Greedy selection
 # ---------------------------------------------------------------------------
 
+def _trim_cluster_by_ml(
+    cl: dict,
+    V_adj: list[float],
+    interaction_times: list[float],
+    budget: float,
+    cap: int,
+    inter_travel: float,
+) -> dict:
+    """
+    When a cluster cannot be visited whole, trim it to the highest-efficiency
+    members that fit within the remaining budget and ACR cap.
+
+    Members are ranked by ML-derived individual efficiency (V_adj / interaction_time)
+    — the model's signal of which customers are worth visiting most.  The TSP
+    route order is then re-applied to the kept members so the agent still follows
+    a geographic sequence.
+
+    Returns a new cluster dict representing the trimmed visit set.
+    """
+    from .routing import haversine_matrix, nearest_neighbour_tsp, route_travel_time
+    from .clustering import compute_zone_centroids
+
+    members = cl["member_indices"]
+    coords  = cl["coords"]
+
+    # Rank members by ML efficiency descending
+    ranked = sorted(
+        members,
+        key=lambda i: V_adj[i] / interaction_times[i] if interaction_times[i] > 0 else 0.0,
+        reverse=True,
+    )
+
+    # Greedily add members until budget or cap is exhausted
+    # (conservative: use interaction_time only; intra-cluster travel is
+    #  re-computed on the final kept set)
+    kept, time_used = [], inter_travel
+    for idx in ranked:
+        t = interaction_times[idx]
+        if time_used + t <= budget and len(kept) < cap:
+            kept.append(idx)
+            time_used += t
+        if len(kept) >= cap or time_used >= budget:
+            break
+
+    if not kept:
+        return cl  # nothing fits — caller will skip this cluster
+
+    # Re-run TSP on the kept members so the geographic route is preserved
+    member_pos  = {idx: pos for pos, idx in enumerate(members)}
+    kept_coords = [coords[member_pos[i]] for i in kept]
+    if len(kept) == 1:
+        sub_mat      = haversine_matrix(kept_coords)
+        trimmed_route = kept[:]
+        travel_min   = 0.0
+    else:
+        sub_mat      = haversine_matrix(kept_coords)
+        local_route  = nearest_neighbour_tsp(list(range(len(kept))), sub_mat, two_opt=True)
+        trimmed_route = [kept[j] for j in local_route]
+        travel_min   = route_travel_time(local_route, sub_mat)
+
+    interaction_min = sum(interaction_times[i] for i in kept)
+    total_min       = travel_min + interaction_min
+    V_kept          = sum(V_adj[i] for i in kept)
+
+    return {
+        **cl,
+        "member_indices": kept,
+        "route":          trimmed_route,
+        "coords":         [kept_coords[kept.index(i)] for i in trimmed_route],
+        "travel_matrix":  sub_mat,
+        "travel_time_min":     travel_min,
+        "interaction_time_min": interaction_min,
+        "total_time_min":      total_min,
+        "efficiency":          V_kept / total_min if total_min > 0 else 0.0,
+        "_trimmed": True,
+    }
+
+
 def greedy_select(
     customers: list[Customer],
     scoreable_indices: list[int],
@@ -71,107 +149,115 @@ def greedy_select(
     mandatory_count: int = 0,
 ) -> tuple[list[dict], list[int]]:
     """
-    Greedily fill remaining budget with clusters and outliers from the scoreable pool.
+    Greedily fill remaining budget with clusters and outliers.
 
-    Only includes clusters/outliers whose members are all in scoreable_indices.
+    For each cluster, the ML-derived efficiency (V_adj / time) determines
+    both the cluster ranking and, when a cluster is too large to visit whole,
+    which members to keep (highest ML efficiency first).  The geographic TSP
+    route is then re-applied to the kept members, so the agent always follows
+    a sensible geographic sequence within each cluster.
 
     Returns (selected_clusters, selected_outlier_indices).
     """
     scoreable_set = set(scoreable_indices)
 
-    # Filter clusters to those fully within the scoreable pool
     eligible_clusters = [
         c for c in clusters
         if all(i in scoreable_set for i in c["member_indices"])
     ]
     eligible_outliers = [i for i in outlier_indices if i in scoreable_set]
 
-    # Annotate with efficiency
+    # Annotate clusters with ML-derived efficiency
     for cl in eligible_clusters:
         cl["efficiency"] = cluster_efficiency(cl, V_adj)
 
-    # Sort descending by efficiency
     eligible_clusters.sort(key=lambda c: c["efficiency"], reverse=True)
-    eligible_outliers.sort(key=lambda i: outlier_efficiency(i, V_adj, interaction_times), reverse=True)
+    eligible_outliers.sort(
+        key=lambda i: outlier_efficiency(i, V_adj, interaction_times), reverse=True
+    )
 
     remaining_budget = daily_budget_min - mandatory_time_min
-    remaining_cap = acr_cap - mandatory_count
+    remaining_cap    = acr_cap - mandatory_count
 
     selected_clusters: list[dict] = []
-    selected_outliers: list[int] = []
-
-    # Track agent's current location to charge inter-cluster travel
+    selected_outliers: list[int]  = []
     current_exit: tuple[float, float] | None = None
 
-    def _cluster_centroid(cl: dict) -> tuple[float, float]:
+    def _centroid(cl: dict) -> tuple[float, float]:
         lats = [cl["coords"][k][0] for k in range(len(cl["coords"]))]
         lons = [cl["coords"][k][1] for k in range(len(cl["coords"]))]
         return (sum(lats) / len(lats), sum(lons) / len(lons))
 
-    def _customer_coord(local_idx: int) -> tuple[float, float]:
-        from .routing import haversine_minutes
-        from .clustering import compute_zone_centroids
+    def _coord(local_idx: int) -> tuple[float, float]:
         c = customers[local_idx]
         if c.lat is not None and c.lon is not None:
             return (c.lat, c.lon)
+        from .clustering import compute_zone_centroids
         zc = compute_zone_centroids(customers)
         return zc.get(c.zone_id, (0.0, 0.0))
 
-    def _inter_travel(dest: tuple[float, float]) -> float:
+    def _inter(dest: tuple[float, float]) -> float:
         from .routing import haversine_minutes
         if current_exit is None:
             return 0.0
-        return haversine_minutes(
-            current_exit[0], current_exit[1],
-            dest[0], dest[1],
-        )
+        return haversine_minutes(current_exit[0], current_exit[1], dest[0], dest[1])
 
     cluster_ptr = 0
     outlier_ptr = 0
 
     while remaining_budget > 0 and remaining_cap > 0:
-        # Advance past clusters that can no longer fit (budget only decreases)
-        while cluster_ptr < len(eligible_clusters):
-            cl = eligible_clusters[cluster_ptr]
-            inter = _inter_travel(_cluster_centroid(cl))
-            if cl["total_time_min"] + inter <= remaining_budget and len(cl["member_indices"]) <= remaining_cap:
-                break
-            cluster_ptr += 1
+        next_cl  = eligible_clusters[cluster_ptr] if cluster_ptr < len(eligible_clusters) else None
+        next_out = eligible_outliers[outlier_ptr]  if outlier_ptr  < len(eligible_outliers)  else None
 
-        next_cluster = eligible_clusters[cluster_ptr] if cluster_ptr < len(eligible_clusters) else None
-        next_outlier_idx = eligible_outliers[outlier_ptr] if outlier_ptr < len(eligible_outliers) else None
-
-        if next_cluster is None and next_outlier_idx is None:
+        if next_cl is None and next_out is None:
             break
 
-        cluster_eff = next_cluster["efficiency"] if next_cluster else -1
+        # Best cluster: either fits whole, or trim to what ML says is worth visiting
+        best_cl = None
+        best_cl_eff = -1.0
+        if next_cl is not None:
+            centroid = _centroid(next_cl)
+            inter    = _inter(centroid)
+            if (next_cl["total_time_min"] + inter <= remaining_budget
+                    and len(next_cl["member_indices"]) <= remaining_cap):
+                best_cl     = next_cl
+                best_cl_eff = next_cl["efficiency"]
+            else:
+                # Too large to visit whole — trim by ML efficiency
+                trimmed = _trim_cluster_by_ml(
+                    next_cl, V_adj, interaction_times,
+                    remaining_budget, remaining_cap, inter,
+                )
+                if len(trimmed["member_indices"]) > 0:
+                    best_cl     = trimmed
+                    best_cl_eff = trimmed["efficiency"]
+
         outlier_eff = (
-            outlier_efficiency(next_outlier_idx, V_adj, interaction_times)
-            if next_outlier_idx is not None else -1
+            outlier_efficiency(next_out, V_adj, interaction_times)
+            if next_out is not None else -1.0
         )
 
-        if cluster_eff >= outlier_eff and next_cluster is not None:
-            cl = next_cluster
-            centroid = _cluster_centroid(cl)
-            inter = _inter_travel(centroid)
-            cl["inter_travel_min"] = inter
-            selected_clusters.append(cl)
-            remaining_budget -= cl["total_time_min"] + inter
-            remaining_cap -= len(cl["member_indices"])
-            current_exit = centroid
-            cluster_ptr += 1
-        elif next_outlier_idx is not None:
-            o_coord = _customer_coord(next_outlier_idx)
-            o_inter = _inter_travel(o_coord)
-            o_time = interaction_times[next_outlier_idx] + o_inter
+        if best_cl is not None and best_cl_eff >= outlier_eff:
+            centroid = _centroid(best_cl)
+            inter    = _inter(centroid)
+            best_cl["inter_travel_min"] = inter
+            selected_clusters.append(best_cl)
+            remaining_budget -= best_cl["total_time_min"] + inter
+            remaining_cap    -= len(best_cl["member_indices"])
+            current_exit      = centroid
+            cluster_ptr      += 1
+        elif next_out is not None:
+            o_coord = _coord(next_out)
+            o_inter = _inter(o_coord)
+            o_time  = interaction_times[next_out] + o_inter
             if o_time <= remaining_budget and remaining_cap >= 1:
-                selected_outliers.append(next_outlier_idx)
+                selected_outliers.append(next_out)
                 remaining_budget -= o_time
-                remaining_cap -= 1
-                current_exit = o_coord
+                remaining_cap    -= 1
+                current_exit      = o_coord
             outlier_ptr += 1
         else:
-            break
+            cluster_ptr += 1  # cluster trimmed to 0, skip it
 
     return selected_clusters, selected_outliers
 
