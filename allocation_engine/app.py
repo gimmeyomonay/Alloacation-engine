@@ -15,7 +15,8 @@ import numpy as np
 from allocation_engine.config import EngineConfig
 from allocation_engine.engine import AllocationEngine
 from allocation_engine.models import Customer
-from allocation_engine.probability import HeuristicModel
+from allocation_engine.probability import HeuristicModel, XGBoostModel
+from allocation_engine.model_registry import ModelRegistry
 from allocation_engine.data_gen import generate_synthetic_portfolio
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,35 @@ seed        = st.sidebar.number_input("Random seed", value=99, step=1,
                                        disabled=(data_source == "Upload CSV"))
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("Probability Model")
+
+_registry = ModelRegistry()
+_active_model_info = _registry.get_active()
+_xgb_available = _active_model_info is not None and os.path.exists(_active_model_info["model_path"])
+
+model_choice = st.sidebar.radio(
+    "Select model",
+    ["Heuristic (rule-based)", "XGBoost (ML)"],
+    index=1 if _xgb_available else 0,
+    disabled=not _xgb_available,
+    help="XGBoost uses the trained ML model. Falls back to heuristic if no model is found.",
+)
+
+if model_choice == "XGBoost (ML)" and _xgb_available:
+    st.sidebar.markdown(
+        f"<div style='background:#1e2a1e;border-left:3px solid #22c55e;"
+        f"padding:8px 12px;border-radius:4px;font-size:12px;'>"
+        f"<b style='color:#22c55e'>XGBoost active</b><br/>"
+        f"Version: {_active_model_info['version_id']} &nbsp;|&nbsp; "
+        f"AUC: {_active_model_info['auc']}<br/>"
+        f"Trained: {_active_model_info['trained_date']}<br/>"
+        f"Records: {_active_model_info['n_records']:,}</div>",
+        unsafe_allow_html=True,
+    )
+elif not _xgb_available:
+    st.sidebar.info("No trained XGBoost model found. Run `python -m training.train --synthetic` to train one.")
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("Engine Config")
 budget_hours   = st.sidebar.slider("Daily budget (hours)", 6, 12, 8)
 acr_cap        = st.sidebar.slider("Max accounts (ACR cap)", 20, 100, 70)
@@ -120,6 +150,15 @@ if "plan" not in st.session_state:
 # ---------------------------------------------------------------------------
 # Run engine
 # ---------------------------------------------------------------------------
+def _build_prob_model(model_choice: str, xgb_available: bool, model_info: dict | None):
+    if model_choice == "XGBoost (ML)" and xgb_available and model_info:
+        try:
+            return XGBoostModel(model_info["model_path"])
+        except Exception:
+            st.warning("Failed to load XGBoost model — falling back to heuristic.")
+    return HeuristicModel()
+
+
 def run_engine(n, seed, budget_hours, acr_cap, eps_base_km, mandatory_pct):
     raw = generate_synthetic_portfolio(n=n, seed=int(seed))
 
@@ -139,7 +178,8 @@ def run_engine(n, seed, budget_hours, acr_cap, eps_base_km, mandatory_pct):
         acr_cap=acr_cap,
         eps_base_km=eps_base_km,
     )
-    engine = AllocationEngine(prob_model=HeuristicModel(), config=cfg)
+    prob_model = _build_prob_model(model_choice, _xgb_available, _active_model_info)
+    engine = AllocationEngine(prob_model=prob_model, config=cfg)
     plan   = engine.run(customers, today=date.today())
     return plan, customers
 
@@ -159,7 +199,8 @@ if st.session_state.plan is None or run_btn:
                 acr_cap=acr_cap,
                 eps_base_km=eps_base_km,
             )
-            engine = AllocationEngine(prob_model=HeuristicModel(), config=cfg)
+            prob_model = _build_prob_model(model_choice, _xgb_available, _active_model_info)
+            engine = AllocationEngine(prob_model=prob_model, config=cfg)
             plan   = engine.run(customers, today=date.today())
         st.session_state.plan      = plan
         st.session_state.customers = customers

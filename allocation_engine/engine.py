@@ -11,7 +11,7 @@ from .config import EngineConfig
 from .models import Customer, CustomerVisit, VisitPlan, WatchItem
 from .probability import ProbabilityModel, HeuristicModel
 from .scoring import score_customer
-from .clustering import compute_zone_centroids, value_weighted_dbscan, build_clusters
+from .clustering import compute_zone_centroids, value_weighted_dbscan, build_clusters, split_oversized_clusters
 from .selection import (
     split_pool, greedy_select, absorb_outliers,
     build_visit_records, cluster_efficiency, outlier_efficiency,
@@ -42,10 +42,17 @@ class AllocationEngine:
         cfg = self.config
 
         # ── Step 1: Score all customers ──────────────────────────────
+        # Batch-predict probabilities if the model supports it (XGBoostModel)
+        if hasattr(self.prob_model, "predict_batch"):
+            batch_probs = self.prob_model.predict_batch(customers, today)
+        else:
+            batch_probs = [None] * len(customers)
+
         scores = [
             score_customer(c, self.prob_model, today,
-                           cfg.repeat_penalty_coeff, cfg.penalty_decay_days)
-            for c in customers
+                           cfg.repeat_penalty_coeff, cfg.penalty_decay_days,
+                           probability=batch_probs[i])
+            for i, c in enumerate(customers)
         ]
         V_adj_all     = [s["V_adj"]          for s in scores]
         interact_all  = [s["interaction_min"] for s in scores]
@@ -66,10 +73,14 @@ class AllocationEngine:
             sc_customers, labels, sc_interact,
             cfg.agent_speed_kmh, cfg.road_factor,
         )
+        clusters = split_oversized_clusters(
+            clusters, cfg.max_cluster_visits, sc_interact,
+            cfg.agent_speed_kmh, cfg.road_factor,
+        )
 
         # ── Step 4: Compute mandatory visit time (interaction + travel) ─
         mandatory_customers = [customers[i] for i in mandatory_idx]
-        mandatory_travel_legs = self._compute_mandatory_travel(
+        mandatory_travel_legs, mandatory_route_order = self._compute_mandatory_travel(
             mandatory_customers, cfg.agent_speed_kmh, cfg.road_factor
         )
         mandatory_time = (
@@ -101,7 +112,8 @@ class AllocationEngine:
 
         # Mandatory visits
         mandatory_visits = self._mandatory_visits(
-            customers, mandatory_idx, scores, seq, mandatory_travel_legs
+            customers, mandatory_idx, scores, seq,
+            mandatory_travel_legs, mandatory_route_order
         )
         seq += len(mandatory_visits)
 
@@ -155,21 +167,24 @@ class AllocationEngine:
         mandatory_customers: list[Customer],
         speed_kmh: float,
         road_factor: float,
-    ) -> list[float]:
+    ) -> tuple[list[float], list[int]]:
         """
         Compute per-leg travel times for mandatory visits using nearest-neighbour
-        ordering. Returns a list of travel times (minutes) aligned with
-        mandatory_customers — index 0 is always 0.0 (no prior travel for first visit).
+        ordering.
+
+        Returns:
+            legs_in_route_order  — travel time per leg, indexed by TSP position
+            route_order          — TSP visit order as indices into mandatory_customers
         """
         from .routing import haversine_minutes
         from .clustering import compute_zone_centroids, assign_coordinates
         if not mandatory_customers:
-            return []
+            return [], []
         zone_centroids = compute_zone_centroids(mandatory_customers)
         coords, _ = assign_coordinates(mandatory_customers, zone_centroids)
         n = len(coords)
         if n == 1:
-            return [0.0]
+            return [0.0], [0]
         # Nearest-neighbour ordering starting from index 0
         unvisited = list(range(1, n))
         order = [0]
@@ -185,7 +200,7 @@ class AllocationEngine:
             )
             order.append(nearest)
             unvisited.remove(nearest)
-        # Build per-leg travel times in order sequence
+        # Build per-leg travel times aligned with route order
         legs_by_order = [0.0]
         for k in range(1, len(order)):
             prev, curr = order[k - 1], order[k]
@@ -194,11 +209,7 @@ class AllocationEngine:
                 coords[curr][0], coords[curr][1],
                 speed_kmh=speed_kmh, road_factor=road_factor,
             ))
-        # Re-map back to original customer order
-        legs = [0.0] * n
-        for pos, orig_idx in enumerate(order):
-            legs[orig_idx] = legs_by_order[pos]
-        return legs
+        return legs_by_order, order
 
     def _mandatory_visits(
         self,
@@ -207,14 +218,25 @@ class AllocationEngine:
         scores: list[dict],
         seq_start: int,
         travel_legs: list[float] | None = None,
+        route_order: list[int] | None = None,
     ) -> list[CustomerVisit]:
+        """
+        Build mandatory visit records in TSP route order so that sequence
+        numbers on the map reflect the actual geographic visit sequence.
+        """
+        n = len(mandatory_idx)
         if travel_legs is None:
-            travel_legs = [0.0] * len(mandatory_idx)
+            travel_legs = [0.0] * n
+        # route_order: positions into mandatory_idx/mandatory_customers in TSP order
+        if route_order is None:
+            route_order = list(range(n))
+
         visits = []
-        for offset, idx in enumerate(mandatory_idx):
+        for seq_offset, local_pos in enumerate(route_order):
+            idx = mandatory_idx[local_pos]          # global customer index
             c = customers[idx]
             s = scores[idx]
-            t_travel = travel_legs[offset] if offset < len(travel_legs) else 0.0
+            t_travel = travel_legs[seq_offset] if seq_offset < len(travel_legs) else 0.0
             total_time = s["interaction_min"] + t_travel
             eff = s["V_adj"] / total_time if total_time > 0 else 0.0
             visits.append(CustomerVisit(
@@ -231,7 +253,7 @@ class AllocationEngine:
                 travel_minutes=round(t_travel, 1),
                 interaction_min=s["interaction_min"],
                 cluster_id=None,
-                visit_sequence=seq_start + offset,
+                visit_sequence=seq_start + seq_offset,
                 rationale=self._mandatory_rationale(c),
             ))
         return visits
@@ -263,12 +285,16 @@ class AllocationEngine:
         # Sort clusters by efficiency descending for visit ordering
         for cl in sorted(sel_clusters, key=lambda c: c.get("efficiency", 0.0), reverse=True):
             cid = cl["cluster_id"]
-            route = cl["route"]           # ordered local indices
+            route = cl["route"]           # sc_customer local indices in TSP order
             size  = len(route)
             travel_mat = cl["travel_matrix"]
+            member_indices = cl["member_indices"]
+
+            # Map sc_customer local index → position in travel_matrix (0..N-1)
+            mat_pos = {idx: pos for pos, idx in enumerate(member_indices)}
+
             # Recompute efficiency using only members within sc_V_adj bounds
-            # (absorbed outliers may have extended member_indices)
-            valid_members = [i for i in cl["member_indices"] if i < len(sc_V_adj)]
+            valid_members = [i for i in member_indices if i < len(sc_V_adj)]
             V_C = sum(sc_V_adj[i] for i in valid_members)
             T_C = cl["total_time_min"]
             eff = V_C / T_C if T_C > 0 else 0.0
@@ -280,12 +306,29 @@ class AllocationEngine:
                 c   = sc_customers[local_idx]
                 s   = scores_all[scoreable_idx[local_idx]]
 
-                # Travel time: first member gets 0 (depot start), rest get leg time
+                # Travel time: first member gets 0 (depot start), rest use
+                # position in travel_matrix. Absorbed outliers are not in the
+                # original matrix — compute their leg directly with haversine.
                 if local_pos == 0:
                     t_travel = 0.0
                 else:
                     prev_local = route[local_pos - 1]
-                    t_travel = float(travel_mat[prev_local, local_idx])
+                    mat_size = travel_mat.shape[0]
+                    i_prev = mat_pos.get(prev_local, -1)
+                    i_curr = mat_pos.get(local_idx, -1)
+                    if 0 <= i_prev < mat_size and 0 <= i_curr < mat_size:
+                        t_travel = float(travel_mat[i_prev, i_curr])
+                    else:
+                        # Absorbed outlier — compute directly
+                        from .clustering import compute_zone_centroids, assign_coordinates
+                        _zc = compute_zone_centroids(sc_customers)
+                        _coords, _ = assign_coordinates(sc_customers, _zc)
+                        lat1, lon1 = _coords[prev_local]
+                        lat2, lon2 = _coords[local_idx]
+                        t_travel = haversine_minutes(
+                            lat1, lon1, lat2, lon2,
+                            speed_kmh=cfg.agent_speed_kmh, road_factor=cfg.road_factor,
+                        )
 
                 rationale = self._cluster_rationale(c, s, size, local_idx, absorbed_set)
 
@@ -332,9 +375,11 @@ class AllocationEngine:
             ))
             seq += 1
 
-        # Re-sort the full ranked list by efficiency descending
-        visits.sort(key=lambda v: v.efficiency, reverse=True)
-
+        # Do NOT re-sort here. Visits are already ordered correctly:
+        # clusters in descending cluster-efficiency order, customers within
+        # each cluster in TSP route order. Re-sorting by individual efficiency
+        # would interleave customers from different clusters and break
+        # the geographic routing the agent is supposed to follow.
         return visits, seq
 
     def _cluster_rationale(

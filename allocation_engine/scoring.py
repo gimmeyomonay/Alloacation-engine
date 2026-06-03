@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
+
 from .models import Customer
 from .probability import get_base_P, get_provision_pct, ProbabilityModel
 
@@ -92,14 +93,18 @@ def score_customer(
     today: date,
     repeat_penalty_coeff: float = 0.35,
     decay_days: int = 30,
+    probability: Optional[float] = None,
 ) -> dict:
     """
     Compute all scoring fields for a single customer.
 
     Returns a dict with keys:
         probability, V_i, urgency_boost, V_adj, interaction_min
+
+    Pass `probability` to skip the model predict call (used for batch pre-computation).
     """
-    probability = prob_model.predict(customer.dpd, customer.reason_code)
+    if probability is None:
+        probability = prob_model.predict(customer.dpd, customer.reason_code, customer=customer)
     V_i = customer.amount * probability
 
     urgency_boost = compute_urgency_boost(

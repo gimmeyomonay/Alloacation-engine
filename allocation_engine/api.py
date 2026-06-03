@@ -15,6 +15,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from datetime import date, datetime
 from typing import Optional
@@ -27,7 +28,8 @@ from .config import EngineConfig
 from .engine import AllocationEngine
 from .feedback import log_visit_outcome, feedback_summary
 from .models import Customer
-from .probability import HeuristicModel
+from .model_registry import ModelRegistry
+from .probability import HeuristicModel, XGBoostModel
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +39,7 @@ from .probability import HeuristicModel
 app = FastAPI(
     title="Collection Allocation Engine",
     description="ML-powered visit planning for field collection agents.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -47,8 +49,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared engine instance (stateless — safe for concurrent requests)
-_engine = AllocationEngine(prob_model=HeuristicModel(), config=EngineConfig())
+
+def _load_prob_model():
+    """Load XGBoostModel if a registered model exists, else fall back to heuristic."""
+    registry = ModelRegistry()
+    info = registry.get_active()
+    if info and os.path.exists(info["model_path"]):
+        try:
+            return XGBoostModel(info["model_path"]), info
+        except Exception:
+            pass
+    return HeuristicModel(), None
+
+
+_prob_model, _model_info = _load_prob_model()
+_engine = AllocationEngine(prob_model=_prob_model, config=EngineConfig())
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +138,56 @@ class OutcomeRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    model_type = "xgboost" if isinstance(_prob_model, XGBoostModel) else "heuristic"
+    return {"status": "ok", "version": "2.0.0", "model_type": model_type}
+
+
+@app.get("/model/info")
+def model_info():
+    """Return metadata about the currently active probability model."""
+    if _model_info is None:
+        return {
+            "model_type": "heuristic",
+            "version_id": None,
+            "auc": None,
+            "n_records": None,
+            "trained_date": None,
+            "notes": "No trained ML model found. Using rule-based heuristic.",
+        }
+    return {
+        "model_type":   "xgboost",
+        "version_id":   _model_info.get("version_id"),
+        "auc":          _model_info.get("auc"),
+        "n_records":    _model_info.get("n_records"),
+        "trained_date": _model_info.get("trained_date"),
+        "model_path":   _model_info.get("model_path"),
+        "notes":        _model_info.get("notes", ""),
+    }
+
+
+@app.get("/model/versions")
+def model_versions():
+    """List all registered model versions."""
+    registry = ModelRegistry()
+    return {
+        "active_version": registry._data.get("active_version"),
+        "versions": registry.list_versions(),
+    }
+
+
+@app.post("/model/activate/{version_id}")
+def activate_model_version(version_id: str):
+    """Switch the active model version (requires restart to take effect in this process)."""
+    registry = ModelRegistry()
+    try:
+        registry.set_active(version_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "status": "updated",
+        "active_version": version_id,
+        "note": "Restart the API server for the new model to load into memory.",
+    }
 
 
 @app.post("/predict", response_model=PredictResponse)

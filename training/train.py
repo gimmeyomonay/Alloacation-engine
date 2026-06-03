@@ -256,4 +256,14 @@ if __name__ == "__main__":
     save_model(model, args.out)
     save_metrics(metrics, args.out.replace(".pkl", "_metrics.json"))
 
+    from allocation_engine.model_registry import ModelRegistry
+    registry = ModelRegistry()
+    version_id = registry.register(
+        model_path=args.out,
+        auc=metrics["auc"],
+        n_records=len(X),
+        make_active=True,
+        notes=f"Trained on {'synthetic' if args.synthetic else 'real'} data",
+    )
+    print(f"Registered as {version_id} (active) in model registry.")
     print(f"\nDone. Deploy with: XGBoostModel('{args.out}')")

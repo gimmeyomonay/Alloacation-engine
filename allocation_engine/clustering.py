@@ -227,3 +227,67 @@ def build_clusters(
         })
 
     return clusters, outliers
+
+
+def split_oversized_clusters(
+    clusters: list[dict],
+    max_visits: int,
+    interaction_times: list[float],
+    speed_kmh: float,
+    road_factor: float,
+) -> list[dict]:
+    """
+    Split any cluster whose member count exceeds `max_visits` into sequential
+    sub-clusters along the TSP route.  Each sub-cluster is capped at max_visits
+    members and gets a new unique cluster_id.
+
+    This ensures the greedy selector can actually fit clusters within the daily
+    budget in dense urban areas (e.g. Bengaluru) where DBSCAN creates very large
+    connected regions.
+    """
+    result: list[dict] = []
+    next_id = max((cl["cluster_id"] for cl in clusters), default=-1) + 1
+
+    for cl in clusters:
+        route = cl["route"]
+        if len(route) <= max_visits:
+            result.append(cl)
+            continue
+
+        # Split route into chunks of max_visits
+        mat = cl["travel_matrix"]
+        member_indices = cl["member_indices"]
+        all_coords = cl["coords"]
+
+        for chunk_start in range(0, len(route), max_visits):
+            chunk_route = route[chunk_start: chunk_start + max_visits]
+            # member_indices and coords for this chunk
+            chunk_members = list(chunk_route)  # route already holds local indices
+            chunk_coords = [all_coords[member_indices.index(i)] for i in chunk_members]
+
+            # Recompute travel matrix and TSP for the sub-cluster
+            sub_mat = haversine_matrix(chunk_coords, speed_kmh=speed_kmh, road_factor=road_factor)
+            local_route = nearest_neighbour_tsp(list(range(len(chunk_members))), sub_mat)
+            sub_route = [chunk_members[j] for j in local_route]
+            sub_coords = [chunk_coords[j] for j in local_route]
+
+            travel_min = route_travel_time(local_route, sub_mat)
+            interaction_min = sum(interaction_times[i] for i in chunk_members)
+            total_min = travel_min + interaction_min
+
+            cid = cl["cluster_id"] if chunk_start == 0 else next_id
+            if chunk_start > 0:
+                next_id += 1
+
+            result.append({
+                "cluster_id":           cid,
+                "member_indices":       chunk_members,
+                "route":                sub_route,
+                "travel_time_min":      travel_min,
+                "interaction_time_min": interaction_min,
+                "total_time_min":       total_min,
+                "coords":               sub_coords,
+                "travel_matrix":        sub_mat,
+            })
+
+    return result

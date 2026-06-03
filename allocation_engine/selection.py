@@ -130,6 +130,14 @@ def greedy_select(
     outlier_ptr = 0
 
     while remaining_budget > 0 and remaining_cap > 0:
+        # Advance past clusters that can no longer fit (budget only decreases)
+        while cluster_ptr < len(eligible_clusters):
+            cl = eligible_clusters[cluster_ptr]
+            inter = _inter_travel(_cluster_centroid(cl))
+            if cl["total_time_min"] + inter <= remaining_budget and len(cl["member_indices"]) <= remaining_cap:
+                break
+            cluster_ptr += 1
+
         next_cluster = eligible_clusters[cluster_ptr] if cluster_ptr < len(eligible_clusters) else None
         next_outlier_idx = eligible_outliers[outlier_ptr] if outlier_ptr < len(eligible_outliers) else None
 
@@ -142,41 +150,28 @@ def greedy_select(
             if next_outlier_idx is not None else -1
         )
 
-        if cluster_eff >= outlier_eff:
+        if cluster_eff >= outlier_eff and next_cluster is not None:
             cl = next_cluster
             centroid = _cluster_centroid(cl)
             inter = _inter_travel(centroid)
-            cl_time = cl["total_time_min"] + inter
-            cl_count = len(cl["member_indices"])
-            if cl_time <= remaining_budget and cl_count <= remaining_cap:
-                selected_clusters.append(cl)
-                cl["inter_travel_min"] = inter
-                remaining_budget -= cl_time
-                remaining_cap -= cl_count
-                current_exit = centroid
-            else:
-                if next_outlier_idx is not None:
-                    o_coord = _customer_coord(next_outlier_idx)
-                    o_inter = _inter_travel(o_coord)
-                    o_time = interaction_times[next_outlier_idx] + o_inter
-                    if o_time <= remaining_budget and 1 <= remaining_cap:
-                        selected_outliers.append(next_outlier_idx)
-                        remaining_budget -= o_time
-                        remaining_cap -= 1
-                        current_exit = o_coord
-                        outlier_ptr += 1
-                        continue
+            cl["inter_travel_min"] = inter
+            selected_clusters.append(cl)
+            remaining_budget -= cl["total_time_min"] + inter
+            remaining_cap -= len(cl["member_indices"])
+            current_exit = centroid
             cluster_ptr += 1
-        else:
+        elif next_outlier_idx is not None:
             o_coord = _customer_coord(next_outlier_idx)
             o_inter = _inter_travel(o_coord)
             o_time = interaction_times[next_outlier_idx] + o_inter
-            if o_time <= remaining_budget and 1 <= remaining_cap:
+            if o_time <= remaining_budget and remaining_cap >= 1:
                 selected_outliers.append(next_outlier_idx)
                 remaining_budget -= o_time
                 remaining_cap -= 1
                 current_exit = o_coord
             outlier_ptr += 1
+        else:
+            break
 
     return selected_clusters, selected_outliers
 
