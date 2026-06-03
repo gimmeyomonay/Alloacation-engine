@@ -9,6 +9,7 @@ from typing import Optional
 
 @dataclass
 class Customer:
+    # ── Phase 1 fields ───────────────────────────────────────────────────────
     customer_id:       str
     name:              str
     osp:               float
@@ -28,6 +29,31 @@ class Customer:
     is_mandatory:      bool
     is_msd_zone:       bool
     loan_product:      str
+
+    # ── Phase 2 fields — EMI / obligation context ────────────────────────────
+    emi_amount:                   float = 0.0
+    number_of_missed_installments: int  = 0
+    next_due_amount:              float = 0.0
+
+    # ── Phase 2 fields — payment behaviour history ───────────────────────────
+    last_paid_amount:             float = 0.0
+    last_paid_date:               Optional[date] = None
+    payment_count_last_90_days:   int   = 0
+    total_paid_last_30_days:      float = 0.0
+    avg_payment_amount:           float = 0.0
+
+    # ── Phase 2 fields — repeat / stability indicators ───────────────────────
+    delinquency_cycle_count:      int   = 0
+    times_rolled_back_to_current: int   = 0
+    months_since_first_delinquency: int = 0
+
+    # ── Phase 2 fields — contactability ─────────────────────────────────────
+    contact_status:               str   = "reachable"  # reachable|unreachable|refused
+    last_contact_date:            Optional[date] = None
+
+    # ── Phase 2 fields — ML outcome label (for training data) ────────────────
+    did_pay_after_visit:          Optional[bool]  = None
+    amount_recovered_after_visit: Optional[float] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Customer":
@@ -63,11 +89,11 @@ class WatchItem:
     name:               str
     osp:                float
     current_dpd:        int
-    days_to_boundary:   int         # days until next bucket crossing
+    days_to_boundary:   int
     projected_dpd:      int
     projected_V:        float
     projected_urgency:  float
-    score:              float       # projected_urgency + projected_V
+    score:              float
 
 
 @dataclass

@@ -86,45 +86,83 @@ class HeuristicModel(ProbabilityModel):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — ML model stub
+# Phase 2 — XGBoost model (trained, not a stub)
+# ---------------------------------------------------------------------------
+
+class XGBoostModel(ProbabilityModel):
+    """
+    XGBoost classifier trained on historical visit outcomes.
+
+    Expects a model saved by training/train.py (joblib pickle of a
+    CalibratedClassifierCV wrapping XGBClassifier).
+
+    Usage:
+        model = XGBoostModel("models/xgb_recovery.pkl")
+        engine = AllocationEngine(prob_model=model)
+    """
+
+    def __init__(self, model_path: str):
+        try:
+            import joblib
+            self._model = joblib.load(model_path)
+            self._model_path = model_path
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load XGBoost model from {model_path}: {exc}\n"
+                f"Train first with: python -m training.train --synthetic"
+            ) from exc
+
+    def predict(self, dpd: int, reason_code: str, customer=None, **kwargs) -> float:
+        """
+        Predict P(recovery) using the full Phase 2 feature vector.
+
+        Pass `customer` (a Customer instance) for the full feature set.
+        Falls back to a simple DPD-only feature vector if customer is None.
+        """
+        import numpy as np
+        from datetime import date
+
+        if customer is not None:
+            from .features import extract_features
+            features = extract_features(customer, date.today())
+        else:
+            # Minimal fallback — only DPD available, pad remaining features
+            from .features import FEATURE_NAMES
+            features = [float(dpd)] + [0.0] * (len(FEATURE_NAMES) - 1)
+
+        X = np.array([features], dtype=np.float32)
+        prob = float(self._model.predict_proba(X)[0][1])
+        return min(1.0, max(0.02, prob))
+
+    def predict_batch(self, customers: list, today=None) -> list[float]:
+        """
+        Batch predict for a list of Customer objects.
+        More efficient than calling predict() one-by-one.
+        """
+        import numpy as np
+        from datetime import date
+        from .features import extract_features_batch
+
+        if today is None:
+            today = date.today()
+
+        X = np.array(extract_features_batch(customers, today), dtype=np.float32)
+        probs = self._model.predict_proba(X)[:, 1]
+        return [min(1.0, max(0.02, float(p))) for p in probs]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Online/Bandit model (future stub)
 # ---------------------------------------------------------------------------
 
 class MLModel(ProbabilityModel):
     """
-    XGBoost model trained on historical outcomes.
-    Swap in once 6-month outcome data is available.
+    Legacy stub name — now an alias for XGBoostModel.
+    Kept for backwards compatibility.
     """
 
     def __init__(self, model_path: str):
-        # Lazy import so scikit/xgboost aren't required until this class is used
-        try:
-            import joblib
-            self._model = joblib.load(model_path)
-        except Exception as exc:
-            raise RuntimeError(f"Could not load ML model from {model_path}: {exc}") from exc
+        self._inner = XGBoostModel(model_path)
 
-    def predict(
-        self,
-        dpd: int,
-        reason_code: str,
-        osp: float = 0.0,
-        ptp_reliability: float = 0.5,
-        days_since_contact: int = 0,
-        mob: int = 0,
-        prior_writeoff: bool = False,
-        bureau_score: float = 0.0,
-        **kwargs,
-    ) -> float:
-        import numpy as np
-
-        features = np.array([[
-            dpd,
-            osp,
-            ptp_reliability,
-            days_since_contact,
-            mob,
-            int(prior_writeoff),
-            bureau_score,
-        ]])
-        prob = float(self._model.predict_proba(features)[0][1])
-        return min(1.0, max(0.02, prob))
+    def predict(self, dpd: int, reason_code: str, **kwargs) -> float:
+        return self._inner.predict(dpd, reason_code, **kwargs)
