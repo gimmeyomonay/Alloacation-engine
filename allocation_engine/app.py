@@ -384,19 +384,35 @@ with tab1:
     # ── Arc layer — TSP sequence lines within each cluster ────────────────
     from collections import defaultdict
     cluster_visits: dict = defaultdict(list)
+
+    # Ranked clusters
     for v in plan.ranked_visits:
         if v.cluster_id is not None:
             c = cust_map.get(v.customer_id)
             if c and c.lat is not None:
-                cluster_visits[v.cluster_id].append(
-                    (v.visit_sequence, c.lat, c.lon, v.cluster_id)
+                cluster_visits[("ranked", v.cluster_id)].append(
+                    (v.visit_sequence, c.lat, c.lon, v.cluster_id, "ranked")
                 )
-    for cid, members in cluster_visits.items():
+
+    # Mandatory clusters — draw route lines between co-clustered mandatories
+    for v in plan.mandatory_visits:
+        if v.cluster_id is not None:
+            c = cust_map.get(v.customer_id)
+            if c and c.lat is not None:
+                cluster_visits[("mandatory", v.cluster_id)].append(
+                    (v.visit_sequence, c.lat, c.lon, v.cluster_id, "mandatory")
+                )
+
+    for key, members in cluster_visits.items():
+        visit_type, cid = key
         members.sort(key=lambda x: x[0])
-        colour = cluster_colour_map.get(cid, CLUSTER_COLOURS[0])
+        if visit_type == "mandatory":
+            colour = [239, 68, 68]   # red to match mandatory pins
+        else:
+            colour = cluster_colour_map.get(cid, CLUSTER_COLOURS[0])
         for i in range(len(members) - 1):
-            _, lat1, lon1, _ = members[i]
-            _, lat2, lon2, _ = members[i + 1]
+            _, lat1, lon1, _, _ = members[i]
+            _, lat2, lon2, _, _ = members[i + 1]
             arc_rows.append({
                 "source_lat": lat1, "source_lon": lon1,
                 "target_lat": lat2, "target_lon": lon2,
@@ -494,8 +510,30 @@ with tab1:
             )
             st.markdown("&nbsp;")
 
+            # Mandatory clusters
+            mand_cl_ids = sorted({v.cluster_id for v in plan.mandatory_visits if v.cluster_id is not None})
+            if mand_cl_ids:
+                st.markdown("**Mandatory Clusters**")
+                mand_cl_stats: dict = defaultdict(lambda: {"count": 0, "recovery": 0.0})
+                for v in plan.mandatory_visits:
+                    if v.cluster_id is not None:
+                        mand_cl_stats[v.cluster_id]["count"]    += 1
+                        mand_cl_stats[v.cluster_id]["recovery"] += v.V_adj
+                for cid in mand_cl_ids:
+                    stat = mand_cl_stats[cid]
+                    st.markdown(
+                        f'<div style="border-left:4px solid #ef4444;'
+                        f'padding:6px 10px;margin-bottom:6px;'
+                        f'background:rgba(255,255,255,0.04);border-radius:0 4px 4px 0;">'
+                        f'<b style="color:#ef4444">Mandatory cluster {cid}</b><br/>'
+                        f'<span style="font-size:12px;color:#aaa;">'
+                        f'{stat["count"]} accounts &middot; '
+                        f'Rs{stat["recovery"]:,.0f}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
             if cluster_colour_map:
-                st.markdown("**Clusters**")
+                st.markdown("**Ranked Clusters**")
                 cl_stats: dict = defaultdict(lambda: {"count": 0, "recovery": 0.0, "eff": []})
                 for v in plan.ranked_visits:
                     if v.cluster_id is not None:
