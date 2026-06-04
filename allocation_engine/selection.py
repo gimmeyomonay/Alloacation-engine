@@ -128,6 +128,7 @@ def _trim_cluster_by_ml(
         "route":          trimmed_route,
         "coords":         [kept_coords[kept.index(i)] for i in trimmed_route],
         "travel_matrix":  sub_mat,
+        "mat_pos":        {idx: pos for pos, idx in enumerate(kept)},  # rebuild for new sub_mat
         "travel_time_min":     travel_min,
         "interaction_time_min": interaction_min,
         "total_time_min":      total_min,
