@@ -215,6 +215,9 @@ def build_clusters(
         interaction_min = sum(interaction_times[i] for i in member_indices)
         total_min = travel_min + interaction_min
 
+        # mat_pos maps each route index → its row/col position in travel_matrix
+        mat_pos = {global_idx: pos for pos, global_idx in enumerate(member_indices)}
+
         clusters.append({
             "cluster_id":          cid,
             "member_indices":      member_indices,
@@ -224,6 +227,7 @@ def build_clusters(
             "total_time_min":      total_min,
             "coords":              member_coords,
             "travel_matrix":       mat,
+            "mat_pos":             mat_pos,
         })
 
     return clusters, outliers
