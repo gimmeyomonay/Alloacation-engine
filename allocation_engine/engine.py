@@ -448,7 +448,16 @@ class AllocationEngine:
                     t_travel = 0.0
                 else:
                     prev_local = route[local_pos - 1]
-                    t_travel = float(travel_mat[mat_pos[prev_local], mat_pos[local_idx]])
+                    if prev_local in mat_pos and local_idx in mat_pos:
+                        t_travel = float(travel_mat[mat_pos[prev_local], mat_pos[local_idx]])
+                    else:
+                        # Absorbed outlier not in original travel matrix — fall back to haversine
+                        prev_c = sc_customers[prev_local]
+                        curr_c = sc_customers[local_idx]
+                        t_travel = haversine_minutes(
+                            prev_c.lat or 0.0, prev_c.lon or 0.0,
+                            curr_c.lat or 0.0, curr_c.lon or 0.0,
+                        )
 
                 rationale = self._cluster_rationale(c, s, size, local_idx, absorbed_set)
 
